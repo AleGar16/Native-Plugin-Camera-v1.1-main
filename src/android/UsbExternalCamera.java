@@ -134,8 +134,8 @@ public class UsbExternalCamera extends CordovaPlugin {
     private boolean openCamera(JSONArray args, CallbackContext callbackContext) throws JSONException {
         JSONObject options = args.optJSONObject(0);
         if (options != null) {
-            previewWidth = options.optInt("width", 1280);
-            previewHeight = options.optInt("height", 720);
+            previewWidth = options.optInt("width", 1920);
+            previewHeight = options.optInt("height", 1080);
             previewFps = options.optInt("fps", 30);
             
             String requestedCameraId = options.optString("cameraId", null);
