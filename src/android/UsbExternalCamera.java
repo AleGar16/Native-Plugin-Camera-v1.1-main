@@ -638,7 +638,7 @@ public class UsbExternalCamera extends CordovaPlugin {
 
         YuvImage yuvImage = new YuvImage(nv21, ImageFormat.NV21, image.getWidth(), image.getHeight(), null);
         ByteArrayOutputStream out = new ByteArrayOutputStream();
-        yuvImage.compressToJpeg(new Rect(0, 0, image.getWidth(), image.getHeight()), previewJpegQuality, out);
+        yuvImage.compressToJpeg(new Rect(0, 0, image.getWidth(), image.getHeight()), 80, out);
         byte[] jpegBytes = out.toByteArray();
         
         return Base64.encodeToString(jpegBytes, Base64.NO_WRAP);
