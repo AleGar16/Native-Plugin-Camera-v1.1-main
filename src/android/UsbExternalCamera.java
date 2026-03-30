@@ -1,5 +1,4 @@
 package com.cordova.plugin;
-//Sium
 // Aggiungi questo importo in cima al file
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbManager;
