@@ -36,7 +36,6 @@
         <source-file src="src/android/UsbExternalCamera.java" target-dir="src/com/cordova/plugin" />
         
         <resource-file src="src/android/res/values/strings.xml" target="res/values/strings_usb_camera.xml" />
-        <resource-file src="src/android/res/xml/device_filter.xml" target="res/xml/device_filter.xml" />
 
         <framework src="src/android/build.gradle" custom="true" type="gradleReference" />
         
