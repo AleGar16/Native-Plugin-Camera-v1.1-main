@@ -55,7 +55,7 @@ export class CameraPage {
   
   startCamera() {
     navigator.usbCamera.open(
-      { width: 1280, height: 720, fps: 30 },
+      { width: 1280, height: 720, fps: 10, previewFrames: false },
       (frame: string) => {
         this.preview.nativeElement.src = 'data:image/jpeg;base64,' + frame;
       },
@@ -92,20 +92,28 @@ export class CameraPage {
 ### Esempio JavaScript
 
 ```javascript
-// Avvia camera con opzioni personalizzate
-navigator.usbCamera.open(
-  { width: 1280, height: 720, fps: 30 },
+// Avvia camera con watchdog di recovery per uso kiosk/totem
+navigator.usbCamera.openWithRecovery(
+  {
+    width: 1280,
+    height: 720,
+    fps: 10,
+    previewFrames: false,
+    jpegQuality: 60,
+    recoverDelayMs: 2500,
+    takePhotoRetryDelayMs: 1500,
+    maxPhotoAttempts: 2
+  },
   function(frame) {
-    // Mostra frame nell'elemento img
-    document.getElementById('preview').src = 'data:image/jpeg;base64,' + frame;
+    // Se previewFrames e' false, qui normalmente non arrivano frame continui
   },
   function(error) {
     console.error('Errore camera:', error);
   }
 );
 
-// Scatta una foto
-navigator.usbCamera.takePhoto(
+// Scatta una foto con retry + recovery automatica
+navigator.usbCamera.takePhotoWithRecovery(
   function(filePath) {
     console.log('Foto salvata in:', filePath);
   },
@@ -146,8 +154,19 @@ Apre la camera USB esterna e avvia l'anteprima.
   - `width` (number): Larghezza anteprima (default: 1280)
   - `height` (number): Altezza anteprima (default: 720)
   - `fps` (number): Frame rate (default: 30)
+  - `previewFrames` (boolean): Se `false`, tiene la camera aperta senza inviare frame base64 continui alla WebView (default: `true`)
+  - `jpegQuality` (number): Qualita' JPEG dei frame preview, utile per ridurre carico CPU/memoria (default: 70)
 - `onFrame` (Function): Callback per ogni frame (riceve stringa base64)
 - `onError` (Function): Callback errore
+
+### navigator.usbCamera.openWithRecovery(options, onFrame, onError)
+
+Versione consigliata per totem/kiosk. Salva la configurazione corrente e, in caso di errore camera, prova automaticamente `recoverCamera()` seguito da `open()`.
+
+**Opzioni aggiuntive:**
+- `recoverDelayMs` (number): attesa prima del tentativo di recover/reopen (default: 2500)
+- `takePhotoRetryDelayMs` (number): attesa prima di ritentare uno scatto dopo recovery (default: 1500)
+- `maxPhotoAttempts` (number): numero massimo di tentativi per `takePhotoWithRecovery` (default: 2)
 
 ### navigator.usbCamera.stopPreview(callback, errorCallback)
 
@@ -158,6 +177,10 @@ Ferma l'anteprima camera senza chiudere la camera.
 Cattura una foto e la salva nella memoria del dispositivo.
 
 **Ritorna:** Percorso file della foto salvata
+
+### navigator.usbCamera.takePhotoWithRecovery(callback, errorCallback)
+
+Esegue lo scatto con retry automatico. Se il primo tentativo fallisce, prova `recoverCamera()` e ritenta fino a `maxPhotoAttempts`.
 
 ### navigator.usbCamera.close(callback, errorCallback)
 

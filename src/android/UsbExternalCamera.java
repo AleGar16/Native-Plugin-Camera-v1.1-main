@@ -21,8 +21,10 @@ import android.media.ImageReader;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.SystemClock;
 import android.util.Base64;
 import android.util.Log;
+import android.util.Range;
 import android.util.Size;
 import androidx.annotation.NonNull;
 import androidx.core.app.ActivityCompat;
@@ -63,11 +65,16 @@ public class UsbExternalCamera extends CordovaPlugin {
     private int previewWidth = 1280;
     private int previewHeight = 720;
     private int previewFps = 30;
+    private int previewJpegQuality = 70;
+    private boolean previewFramesEnabled = true;
     
     private boolean isPreviewActive = false;
     private CallbackContext pendingOpenCallback;
     private JSONArray pendingOpenArgs;
     private boolean autofocusDisabled = false;
+    private volatile boolean isOpeningCamera = false;
+    private volatile boolean isRecoveringCamera = false;
+    private long lastPreviewFrameAtMs = 0L;
     
     private UsbDeviceConnection uvcConnection;
     private UsbInterface videoControlInterface;
@@ -137,6 +144,8 @@ public class UsbExternalCamera extends CordovaPlugin {
             previewWidth = options.optInt("width", 1920);
             previewHeight = options.optInt("height", 1080);
             previewFps = options.optInt("fps", 30);
+            previewJpegQuality = options.optInt("jpegQuality", 70);
+            previewFramesEnabled = options.optBoolean("previewFrames", true);
             
             String requestedCameraId = options.optString("cameraId", null);
             if (requestedCameraId != null && !requestedCameraId.isEmpty()) {
@@ -145,9 +154,13 @@ public class UsbExternalCamera extends CordovaPlugin {
         }
         
         frameCallback = callbackContext;
+        previewFps = Math.max(1, Math.min(previewFps, 30));
+        previewJpegQuality = Math.max(40, Math.min(previewJpegQuality, 80));
         
         cordova.getThreadPool().execute(() -> {
             try {
+                closeCaptureResources();
+                lastPreviewFrameAtMs = 0L;
                 initializeCamera();
             } catch (Exception e) {
                 Log.e(TAG, "Error opening camera", e);
@@ -199,33 +212,8 @@ public class UsbExternalCamera extends CordovaPlugin {
 
     private boolean closeCamera(CallbackContext callbackContext) {
         try {
+            closeCaptureResources();
             closeBackgroundThread();
-            if (captureSession != null) {
-                captureSession.close();
-                captureSession = null;
-            }
-            if (cameraDevice != null) {
-                cameraDevice.close();
-                cameraDevice = null;
-            }
-            if (imageReader != null) {
-                imageReader.close();
-                imageReader = null;
-            }
-            
-            if (uvcConnection != null) {
-                try {
-                    if (videoControlInterface != null) {
-                        uvcConnection.releaseInterface(videoControlInterface);
-                    }
-                    uvcConnection.close();
-                } catch (Exception e) {
-                    Log.e(TAG, "Error closing UVC connection", e);
-                }
-                uvcConnection = null;
-                videoControlInterface = null;
-            }
-            
             isPreviewActive = false;
             frameCallback = null;
             callbackContext.success("Camera closed");
@@ -234,6 +222,84 @@ public class UsbExternalCamera extends CordovaPlugin {
             callbackContext.error("Failed to close camera: " + e.getMessage());
         }
         return true;
+    }
+
+    private void closeCaptureResources() {
+        isOpeningCamera = false;
+        if (captureSession != null) {
+            try {
+                captureSession.stopRepeating();
+            } catch (Exception ignored) {}
+            try {
+                captureSession.abortCaptures();
+            } catch (Exception ignored) {}
+            try {
+                captureSession.close();
+            } catch (Exception ignored) {}
+            captureSession = null;
+        }
+        if (cameraDevice != null) {
+            try {
+                cameraDevice.close();
+            } catch (Exception ignored) {}
+            cameraDevice = null;
+        }
+        if (imageReader != null) {
+            try {
+                imageReader.close();
+            } catch (Exception ignored) {}
+            imageReader = null;
+        }
+        if (uvcConnection != null) {
+            try {
+                if (videoControlInterface != null) {
+                    uvcConnection.releaseInterface(videoControlInterface);
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Error releasing UVC interface", e);
+            }
+            try {
+                uvcConnection.close();
+            } catch (Exception e) {
+                Log.e(TAG, "Error closing UVC connection", e);
+            }
+            uvcConnection = null;
+            videoControlInterface = null;
+        }
+    }
+
+    private Range<Integer> buildPreviewFpsRange() {
+        int target = Math.max(1, Math.min(previewFps, 30));
+        int min = Math.max(1, Math.min(target, 15));
+        return new Range<>(min, target);
+    }
+
+    private void scheduleCameraRecovery(String reason) {
+        if (isRecoveringCamera) {
+            Log.d(TAG, "Recovery already in progress, skipping duplicate request: " + reason);
+            return;
+        }
+        isRecoveringCamera = true;
+        Log.w(TAG, "Scheduling camera recovery: " + reason);
+        cordova.getThreadPool().execute(() -> {
+            try {
+                Thread.sleep(1000);
+                closeCaptureResources();
+                if (cameraManager == null) {
+                    cameraManager = (CameraManager) cordova.getActivity().getSystemService(Context.CAMERA_SERVICE);
+                }
+                startBackgroundThread();
+                if (externalCameraId == null || externalCameraId.isEmpty()) {
+                    initializeCamera();
+                } else {
+                    openCameraDevice();
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Scheduled camera recovery failed", e);
+            } finally {
+                isRecoveringCamera = false;
+            }
+        });
     }
 
     private void initializeCamera() throws CameraAccessException {
@@ -285,6 +351,9 @@ public class UsbExternalCamera extends CordovaPlugin {
     }
 
     private void startBackgroundThread() {
+        if (backgroundThread != null && backgroundHandler != null) {
+            return;
+        }
         backgroundThread = new HandlerThread("CameraBackground");
         backgroundThread.start();
         backgroundHandler = new Handler(backgroundThread.getLooper());
@@ -305,12 +374,27 @@ public class UsbExternalCamera extends CordovaPlugin {
 
     private void openCameraDevice() throws CameraAccessException {
         if (ActivityCompat.checkSelfPermission(cordova.getActivity(), Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            if (frameCallback != null) {
+                frameCallback.error("Camera permission not granted");
+            }
             return;
         }
+        if (cameraManager == null || externalCameraId == null || externalCameraId.isEmpty()) {
+            if (frameCallback != null) {
+                frameCallback.error("Camera manager or camera ID not ready");
+            }
+            return;
+        }
+        if (isOpeningCamera) {
+            Log.d(TAG, "openCameraDevice skipped because an open is already in progress");
+            return;
+        }
+        isOpeningCamera = true;
         
         cameraManager.openCamera(externalCameraId, new CameraDevice.StateCallback() {
             @Override
             public void onOpened(@NonNull CameraDevice camera) {
+                isOpeningCamera = false;
                 cameraDevice = camera;
                 try {
                     createCameraPreviewSession();
@@ -324,30 +408,58 @@ public class UsbExternalCamera extends CordovaPlugin {
 
             @Override
             public void onDisconnected(@NonNull CameraDevice camera) {
+                isOpeningCamera = false;
                 camera.close();
                 cameraDevice = null;
+                captureSession = null;
+                isPreviewActive = false;
+                scheduleCameraRecovery("Camera disconnected");
             }
 
             @Override
             public void onError(@NonNull CameraDevice camera, int error) {
+                isOpeningCamera = false;
                 camera.close();
                 cameraDevice = null;
+                captureSession = null;
+                isPreviewActive = false;
                 if (frameCallback != null) {
                     frameCallback.error("Camera error: " + error);
                 }
+                scheduleCameraRecovery("Camera error " + error);
             }
         }, backgroundHandler);
     }
 
     private void createCameraPreviewSession() throws CameraAccessException {
+        if (captureSession != null) {
+            try {
+                captureSession.stopRepeating();
+            } catch (Exception ignored) {}
+            try {
+                captureSession.close();
+            } catch (Exception ignored) {}
+            captureSession = null;
+        }
+        if (imageReader != null) {
+            try {
+                imageReader.close();
+            } catch (Exception ignored) {}
+        }
         imageReader = ImageReader.newInstance(previewWidth, previewHeight, ImageFormat.YUV_420_888, 2);
         imageReader.setOnImageAvailableListener(new ImageReader.OnImageAvailableListener() {
             @Override
             public void onImageAvailable(ImageReader reader) {
-                if (isPreviewActive && frameCallback != null) {
+                if (isPreviewActive && frameCallback != null && previewFramesEnabled) {
                     Image image = reader.acquireLatestImage();
                     if (image != null) {
                         try {
+                            long now = SystemClock.elapsedRealtime();
+                            long minFrameIntervalMs = Math.max(66L, 1000L / Math.max(1, previewFps));
+                            if ((now - lastPreviewFrameAtMs) < minFrameIntervalMs) {
+                                return;
+                            }
+                            lastPreviewFrameAtMs = now;
                             String base64Frame = convertImageToBase64(image);
                             PluginResult result = new PluginResult(PluginResult.Status.OK, base64Frame);
                             result.setKeepCallback(true);
@@ -402,6 +514,7 @@ public class UsbExternalCamera extends CordovaPlugin {
                             
                             Log.d(TAG, "Using optimized AF_MODE_AUTO for USB webcam");
                         }
+                            previewRequestBuilder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, buildPreviewFpsRange());
                             CaptureRequest previewRequest = previewRequestBuilder.build();
                             captureSession.setRepeatingRequest(previewRequest, null, backgroundHandler);
                             isPreviewActive = true;
@@ -458,21 +571,52 @@ public class UsbExternalCamera extends CordovaPlugin {
                         @Override
                         public void onConfigured(@NonNull CameraCaptureSession session) {
                             try {
-                                session.capture(captureBuilder.build(), null, backgroundHandler);
+                                session.capture(captureBuilder.build(), new CameraCaptureSession.CaptureCallback() {
+                                    @Override
+                                    public void onCaptureCompleted(@NonNull CameraCaptureSession activeSession,
+                                                                   @NonNull CaptureRequest request,
+                                                                   @NonNull TotalCaptureResult result) {
+                                        try {
+                                            activeSession.close();
+                                        } catch (Exception ignored) {}
+                                        if (cameraDevice != null) {
+                                            try {
+                                                createCameraPreviewSession();
+                                            } catch (Exception e) {
+                                                Log.e(TAG, "Error restoring preview after photo", e);
+                                                scheduleCameraRecovery("Failed to restore preview after photo");
+                                            }
+                                        }
+                                    }
+
+                                    @Override
+                                    public void onCaptureFailed(@NonNull CameraCaptureSession activeSession,
+                                                                @NonNull CaptureRequest request,
+                                                                @NonNull CaptureFailure failure) {
+                                        try {
+                                            activeSession.close();
+                                        } catch (Exception ignored) {}
+                                        callbackContext.error("Photo capture failed");
+                                        scheduleCameraRecovery("Photo capture failed");
+                                    }
+                                }, backgroundHandler);
                             } catch (CameraAccessException e) {
                                 Log.e(TAG, "Error capturing photo", e);
                                 callbackContext.error("Failed to capture photo: " + e.getMessage());
+                                scheduleCameraRecovery("Failed to capture photo");
                             }
                         }
 
                         @Override
                         public void onConfigureFailed(@NonNull CameraCaptureSession session) {
                             callbackContext.error("Failed to configure capture session");
+                            scheduleCameraRecovery("Failed to configure photo session");
                         }
                     }, backgroundHandler);
         } catch (Exception e) {
             Log.e(TAG, "Error in captureStillPicture", e);
             callbackContext.error("Failed to take photo: " + e.getMessage());
+            scheduleCameraRecovery("Exception during photo capture");
         }
     }
 
@@ -493,7 +637,7 @@ public class UsbExternalCamera extends CordovaPlugin {
 
         YuvImage yuvImage = new YuvImage(nv21, ImageFormat.NV21, image.getWidth(), image.getHeight(), null);
         ByteArrayOutputStream out = new ByteArrayOutputStream();
-        yuvImage.compressToJpeg(new Rect(0, 0, image.getWidth(), image.getHeight()), 100, out);
+        yuvImage.compressToJpeg(new Rect(0, 0, image.getWidth(), image.getHeight()), previewJpegQuality, out);
         byte[] jpegBytes = out.toByteArray();
         
         return Base64.encodeToString(jpegBytes, Base64.NO_WRAP);
@@ -1749,6 +1893,23 @@ public class UsbExternalCamera extends CordovaPlugin {
     private boolean recoverCamera(CallbackContext callbackContext) {
         cordova.getThreadPool().execute(() -> {
             try {
+                closeCaptureResources();
+                isPreviewActive = false;
+                try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
+                if (cameraManager == null) {
+                    cameraManager = (CameraManager) cordova.getActivity().getSystemService(Context.CAMERA_SERVICE);
+                }
+                startBackgroundThread();
+                if (externalCameraId == null || externalCameraId.isEmpty()) {
+                    initializeCamera();
+                } else {
+                    openCameraDevice();
+                }
+                if (cameraManager != null) {
+                    callbackContext.success("Camera recovery attempted");
+                    return;
+                } else { /*
+                Log.d(TAG, "Manual recovery pre-cleanup completed, continuing with legacy recovery path");
                 // Rilascia qualsiasi connessione UVC pendente
                 releaseUvcConnection();
                 // Chiudi sessione e device se presenti
@@ -1780,6 +1941,7 @@ public class UsbExternalCamera extends CordovaPlugin {
                     openCameraDevice();
                 }
                 callbackContext.success("Camera recovery attempted");
+                */ }
             } catch (Exception e) {
                 Log.e(TAG, "Error recovering camera", e);
                 callbackContext.error("Failed to recover camera: " + e.getMessage());
