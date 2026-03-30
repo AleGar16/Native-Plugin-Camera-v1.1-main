@@ -175,6 +175,10 @@ var UsbCamera = {
     listCameras: function (callback, errorCallback) {
         exec(callback, errorCallback, 'UsbExternalCamera', 'listCameras', []);
     },
+
+    listUsbDevices: function (callback, errorCallback) {
+        exec(callback, errorCallback, 'UsbExternalCamera', 'listUsbDevices', []);
+    },
     
     disableAutofocus: function (callback, errorCallback) {
         exec(callback, errorCallback, 'UsbExternalCamera', 'disableAutofocus', []);

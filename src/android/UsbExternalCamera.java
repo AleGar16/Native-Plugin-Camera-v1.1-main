@@ -105,6 +105,8 @@ public class UsbExternalCamera extends CordovaPlugin {
                 return closeCamera(callbackContext);
             case "listCameras":
                 return listCameras(callbackContext);
+            case "listUsbDevices":
+                return listUsbDevices(callbackContext);
             case "disableAutofocus":
                 return disableAutofocus(callbackContext);
             case "triggerAutofocus":
@@ -958,6 +960,61 @@ public class UsbExternalCamera extends CordovaPlugin {
             callbackContext.success(cameras);
         } catch (Exception e) {
             callbackContext.error("Error listing cameras: " + e.getMessage());
+        }
+        return true;
+    }
+
+    private boolean listUsbDevices(CallbackContext callbackContext) {
+        try {
+            UsbManager usbManager = (UsbManager) cordova.getActivity().getSystemService(Context.USB_SERVICE);
+            if (usbManager == null) {
+                callbackContext.error("UsbManager not available");
+                return true;
+            }
+
+            HashMap<String, UsbDevice> deviceList = usbManager.getDeviceList();
+            JSONArray devices = new JSONArray();
+
+            for (UsbDevice device : deviceList.values()) {
+                JSONObject usb = new JSONObject();
+                usb.put("deviceName", device.getDeviceName());
+                usb.put("productName", device.getProductName());
+                usb.put("manufacturerName", device.getManufacturerName());
+                usb.put("vendorId", device.getVendorId());
+                usb.put("productId", device.getProductId());
+                usb.put("deviceId", device.getDeviceId());
+                usb.put("deviceClass", device.getDeviceClass());
+                usb.put("deviceSubclass", device.getDeviceSubclass());
+                usb.put("deviceProtocol", device.getDeviceProtocol());
+                usb.put("interfaceCount", device.getInterfaceCount());
+                usb.put("hasPermission", usbManager.hasPermission(device));
+                usb.put("isLogitech", device.getVendorId() == 0x046d);
+
+                boolean hasVideoInterface = false;
+                JSONArray interfaces = new JSONArray();
+                for (int i = 0; i < device.getInterfaceCount(); i++) {
+                    UsbInterface intf = device.getInterface(i);
+                    JSONObject intfJson = new JSONObject();
+                    intfJson.put("id", intf.getId());
+                    intfJson.put("interfaceClass", intf.getInterfaceClass());
+                    intfJson.put("interfaceSubclass", intf.getInterfaceSubclass());
+                    intfJson.put("interfaceProtocol", intf.getInterfaceProtocol());
+                    intfJson.put("endpointCount", intf.getEndpointCount());
+                    if (intf.getInterfaceClass() == 14) {
+                        hasVideoInterface = true;
+                    }
+                    interfaces.put(intfJson);
+                }
+
+                usb.put("hasVideoInterface", hasVideoInterface);
+                usb.put("interfaces", interfaces);
+                devices.put(usb);
+            }
+
+            callbackContext.success(devices);
+        } catch (Exception e) {
+            Log.e(TAG, "Error listing USB devices", e);
+            callbackContext.error("Error listing USB devices: " + e.getMessage());
         }
         return true;
     }
